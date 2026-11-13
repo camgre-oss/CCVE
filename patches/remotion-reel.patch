@@ -1,0 +1,245 @@
+diff -ru a/SKILL.md b/SKILL.md
+--- a/SKILL.md	2026-11-13 05:34:41.230627900 +0100
++++ b/SKILL.md	2026-11-13 05:34:41.274298400 +0100
+@@ -63,6 +63,34 @@
+ **Never re-transcribe an unchanged file.** Whisper jitters between runs and every
+ beat you anchored will drift.
+ 
++### 2b. Rough cut (raw takes only)
++
++Skip this when the creator already cut the take (step 3 finds their cuts). On a
++raw take, propose the cuts before measuring anything:
++
++```bash
++python scripts/autocut.py propose public/recordings/name.mp4 public/recordings/name.words.json
++```
++
++It writes `name.cuts.json` and prints every cut in frames: **silences** (head,
++tail and pauses over 0.35 s, keeping 0.08 s of air each side), **fillers** whisper
++did write (eh, em, mmm), **retakes** (the same 3+ words said again within 20 s:
++the first try goes, cut to the second try's first word) and **unworded voice**
++(sound with no transcribed word, usually a filler whisper dropped; `apply: false`
++by default, check by ear). Show the list, let the creator flip `apply` per row,
++then:
++
++```bash
++python scripts/autocut.py apply public/recordings/name.mp4
++node scripts/transcribe.mjs public/recordings/name.cut.mp4
++```
++
++`name.cut.mp4` is the new master: transcribe it once (whisper times it better
++than the long take, whose pauses it smears words into) and run everything from
++step 3 on it. Tune with `--silence-db -35` (raise to -30 in a noisy room),
++`--min-silence 0.35` (lower for a faster edit) and `--pad 0.08`. Fast talkers
++take `--min-silence 0.25`.
++
+ ### 3. Measure the take
+ 
+ This step is what makes the edit land. Do all of it before proposing anything.
+@@ -93,8 +121,12 @@
+ windscreen top and bottom. These vary per take and per setup. Do not reuse
+ numbers from a previous video.
+ 
+-**Instagram safe band.** The 4:5 grid preview crops to roughly **y285 to y1635**
+-of 1920. Anything that must not be clipped lives inside that band.
++**Safe zone.** Two limits apply at once. Instagram's UI covers the edges of the
++reel (108 px each side, 150 top, **340 bottom**), and the 4:5 grid preview crops
++to roughly **y285 to y1635**. Text and graphics that matter live in
++**x108-972, y285-1580**; video and grounds still go full frame. Never shrink the
++video or add bars to comply. Margins per format, ad margins and the check:
++`references/safe-zone.md`.
+ 
+ ### 4. Map the brief to frames
+ 
+@@ -122,6 +154,7 @@
+ - `references/motion-graphics.md` — how to design the graphics: read the story, a job per
+   moment, "illustrate it" vs "pitch me", cinematic type (words appear once), the quality
+   bar and checklist, and a menu of capabilities
++- `references/safe-zone.md` — Instagram UI margins per format, the grid crop, and the check
+ - `references/captions.md` — caption style, chunking, and the re-timing method
+ - `references/screen-recordings.md` — the camera engine and its traps
+ - `references/audio.md` — music beds, sound effects, and verification
+@@ -161,6 +194,14 @@
+ | `scripts/verify-audio.py` | after any render that added music or sound effects |
+ | `scripts/measure-hook.py` | setting or rewording a text hook (its line widths) |
+ | `scripts/caption-tone.py` | caption treatment per chunk: measures how light the caption band is (light clothing, a light wall, the two-thirds layout) |
++| `scripts/autocut.py` | a raw take needs its silences, fillers and retakes cut (step 2b) |
++| `scripts/safe-zone.py` | after every range render: flags graphics under Instagram's UI |
++| `scripts/contrast.py` | setting up or changing brand colours: WCAG ratio of every pair |
++| `scripts/beat-grid.py` | a music bed is in: its BPM and beat frames, to snap graphic hits to |
++| `scripts/loudness.py` | delivering: brings the final mp4 to -10 LUFS (step 8) |
++
++All Python scripts need ffmpeg on PATH; the measuring ones also need numpy (`python -m pip install numpy`).
++On Windows call them with `python`, not `python3`.
+ 
+ General rules:
+ 
+@@ -192,6 +233,16 @@
+ `hstack` and read it. `--frames` takes one range or one number; a comma list is
+ rejected.
+ 
++Check the same frames against the safe zone (it diffs each frame against the
++source take, so whatever differs is a graphic):
++
++```bash
++python scripts/safe-zone.py public/recordings/name.mp4 "$TMPDIR/check" [--offset <trimBefore frames>]
++```
++
++Every `OUT OF ZONE` line on a resting graphic is a bug; move it. A graphic
++mid-entrance may cross a margin.
++
+ Then render the whole thing. A 1480-frame 1080x1920 render is around **70 seconds**
+ on 12 cores, so rendering is never the thing to avoid.
+ 
+@@ -208,6 +259,20 @@
+ 
+ ### 8. Deliver
+ 
++Bring the finished mp4 to reel loudness, -10 LUFS, after `verify-audio.py`
++passes (that check needs the mix untouched). Image is copied, not re-encoded:
++
++```bash
++python scripts/loudness.py out/name.mp4
++```
++
++It writes `out/name-loud.mp4` and prints the integrated loudness and true peak.
++Plain `loudnorm` stalls near -15 LUFS on speech (its peak ceiling caps the
++gain), so the script compresses, adds gain into a limiter and re-measures.
++Accept -10 to -12 LUFS with true peak at or under -1 dBFS, then
++`mv out/name-loud.mp4 out/name.mp4`. Lower than -12 or a peak warning: listen
++for pumping and check the mix before delivering.
++
+ Send the finished mp4. When a note touches only one beat, also send that segment
+ on its own (`--frames=A-B` to an mp4) so it can be judged without scrubbing.
+ 
+diff -ru a/references/audio.md b/references/audio.md
+--- a/references/audio.md	2026-11-13 05:34:41.328409800 +0100
++++ b/references/audio.md	2026-11-13 05:34:41.380769600 +0100
+@@ -35,6 +35,25 @@
+ gain = 10 ** ((targetDb - measuredMeanDb) / 20)
+ ```
+ 
++## Beat grid
++
++With a bed in, graphic hits that are not tied to a word land on its beats, so
++the edit "sounds" right. Get the grid in composition frames:
++
++```bash
++python scripts/beat-grid.py "public/music pack/track.mp3" --start START_S --frames DUR
++```
++
++It prints the BPM and each beat frame (`|` marks an assumed downbeat: confirm by
++ear before landing a drop on it). Rules:
++
++- **Voice wins.** A graphic tied to a spoken word stays on the word. Snap only
++  hits that are free: transitions, section cards, list items between phrases,
++  stretches with no speech.
++- Snap when a hit sits within 2 frames of a beat; big moments go on beats,
++  secondary ones on the half beat.
++- Choosing `START_S` so a downbeat lands on a cut: `START_S = beatTime - cutFrame / 30`.
++
+ ## Sound effects
+ 
+ Every sound file carries silence before its hit. Fire each cue early by that
+@@ -89,3 +108,9 @@
+ - **bed 15 to 18 dB below the voice**, steady across the video.
+ - **every cue visible as a peak** 9 to 20 dB above the bed, at its frame.
+ - **render mean within 0.1 dB of the source mean**, and no new clipping.
++
++## Delivery loudness
++
++Only after verification passes, bring the final mp4 to -10 LUFS (louder than the
++-14 streaming norm; reels sit there). The command and the check are in SKILL
++step 8. Never loudnorm the music pack or the take itself.
+diff -ru a/references/brand-sheet.md b/references/brand-sheet.md
+--- a/references/brand-sheet.md	2026-11-13 05:34:41.426316400 +0100
++++ b/references/brand-sheet.md	2026-11-13 05:34:41.478642800 +0100
+@@ -17,23 +17,46 @@
+ ## No brand sheet yet
+ 
+ Do not borrow another creator's look and do not invent one silently. Ask the
+-creator to set one up, offering to pull it from what they already have:
++creator to set one up. First offer to pull it from what they already have
++(their website's CSS colour tokens and fonts, or frames from a past video they
++like); whatever that leaves open, ask in **three short rounds, one round per
++message**, with the question tool and options where available. If they answer
++"you pick", pick something coherent and say what in one line.
+ 
+-1. **Their website or existing videos**: read the site's CSS (colour tokens,
+-   fonts) or sample frames from a past video they like.
+-2. **Colour**: a ground (paper, dark, white), one main colour for headlines
+-   and shapes, one accent, and which colours never go over video.
+-3. **Type**: a headline face (and italic or accent face), a label or UI face,
+-   the caption face and weight.
+-4. **Captions**: which treatment is the default (outlined TikTok style, plain
+-   white, an emphasis-word option), and where the line sits on their framing.
+-5. **Hooks and titles**: the default hook style and any options.
+-6. **Motifs**: grounds, cards, label style, transitions they want repeated so
+-   every video feels like one channel.
+-7. **Music**: beds they like, where their sound pack lives.
++**Round 1: identity**
++- Name or handle shown on screen.
++- **Colour**: a ground (paper, dark, white), one main colour for headlines and
++  shapes, one accent, and which colours never go over video. Hex values; if they
++  have none, offer tested sets: ink `#0E0E0F` + orange `#FF5A36` + ivory
++  `#F1EEE6`; black `#0B0B0C` + yellow `#FFD60A` + white; electric blue `#2F3BFF`
++  + white + black; cream `#F4EFE6` + forest `#1F3D2B` + coral `#FF6F59`.
++- **Type**: a headline face (and italic or accent face), a label or UI face, the
++  caption face and weight. Free pairings: Archivo 900 (variable width) +
++  Instrument Serif italic + JetBrains Mono; Inter Tight 700 + Instrument Serif;
++  Fraunces + Inter + IBM Plex Mono; Unbounded + DM Sans + Space Mono.
+ 
+-Write the answers into `brand/BRAND.md` using the sections above, show a few
+-sample frames, and get a yes before the first video uses it.
++**Round 2: format**
++- **Captions**: default treatment (outlined TikTok style, plain white, an
++  emphasis-word option) and where the line sits on their framing.
++- **Hooks and titles**: default hook style and any options.
++- Typical length and on-screen language.
++
++**Round 3: motion and sound**
++- **Pace**: calm (soft moves, few cuts), balanced, or aggressive (a cut on every
++  beat, strong blur and overshoot). Also sets autocut's `--min-silence`
++  (0.45 / 0.35 / 0.25).
++- **Motifs**: grounds, cards, label style, transitions they want repeated so
++  every video feels like one channel.
++- **Music**: beds they like, where their sound pack lives.
++
++**Contrast (required).** Run `python scripts/contrast.py <every hex>` and write
++its pairs into the sheet. Pairs under 3:1 are **forbidden** for text and graphic
++edges (yellow on white, white on yellow); 3:1 to 4.5:1 is large type only. A
++shape that must sit on a forbidden ground gets a 3 px outline in the dark colour.
++
++Write the answers into `brand/BRAND.md` using the sections above plus a
++`Contrast` section, show a few sample frames, and get a yes before the first
++video uses it.
+ 
+ Until a sheet exists, neutral defaults keep the edit moving: white Inter 800
+ captions with a black outline (`components/Caption.tsx`), headline type in a
+diff -ru a/references/motion-graphics.md b/references/motion-graphics.md
+--- a/references/motion-graphics.md	2026-11-13 05:34:41.536846200 +0100
++++ b/references/motion-graphics.md	2026-11-13 05:34:41.588499400 +0100
+@@ -16,11 +16,11 @@
+ 
+ ## Safe area (every graphic)
+ 
+-All motion-graphic content sits inside **x 90-990** and the Instagram 4:5 band
+-**y 285-1635**. Big serif type is the usual offender: a 200 px two-word serif
++All motion-graphic content sits inside **x 108-972, y 285-1580**: Instagram's UI
++margins plus the 4:5 grid crop (`safe-zone.md`). Big serif type is the usual offender: a 200 px two-word serif
+ line runs about 1050 px wide, so size headlines to about 860 px. Thumbnail fans
+ and orbiting card rings drift past the sides too. After the render, measure the
+-real pixel extents (column scan or `drawbox` guides at x90/x990); never
++real pixel extents (column scan or `drawbox` guides at x108/x972, or `scripts/safe-zone.py`); never
+ eyeball it. Decorative full-bleed shapes (blobs, grounds) are exempt.
+ 
+ Timing: graphics enter a few frames before the spoken word and hold until the
+@@ -95,7 +95,7 @@
+   Straight, square, no border, a soft shadow (`CARD_SHADOW`); rounded corners
+   or a fade-in only when asked. Blur or crop other people's names and handles
+   out of DM and comment screenshots.
+-- Anything that matters stays inside the IG 4:5 band (about y285 to y1635).
++- Anything that matters stays inside x108-972, y285-1580 (`safe-zone.md`).
+ - Captions never sit under a full-screen graphic or on his chin; move them.
+ - Sound: pops on lands, whooshes on moves. Offer a plan he can prune.
+ 
